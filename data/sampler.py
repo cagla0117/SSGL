@@ -10,7 +10,7 @@ from reckit import DataIterator
 from reckit import randint_choice
 from reckit import typeassert
 from reckit import pad_sequences
-from collections import Iterable
+from collections.abc import Iterable
 from collections import OrderedDict, defaultdict
 from data import Interaction
 import numpy as np
