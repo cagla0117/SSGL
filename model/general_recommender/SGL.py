@@ -199,11 +199,25 @@ class SGL(AbstractRecommender):
         self.optimizer = torch.optim.Adam(self.lightgcn.parameters(), lr=self.lr)
 
     @timer
-    def create_adj_mat(self, is_subgraph=False, aug_type='ed'):
+    def create_adj_mat(self, is_subgraph=False, aug_type='ed',prune=True):
         n_nodes = self.num_users + self.num_items
         users_items = self.dataset.train_data.to_user_item_pairs()
         users_np, items_np = users_items[:, 0], users_items[:, 1]
+        
+        if prune:
+            print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
 
+            # Kullanıcı başına etkileşim sayısını hesapla
+            unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
+
+            # 5'ten az etkileşimi olan kullanıcıları bul
+            users_to_prune = unique_users[user_interaction_counts < 25]
+
+            # Bu kullanıcıların etkileşimlerini kaldır
+            prune_mask = np.isin(users_np, users_to_prune, invert=True)
+            users_np = users_np[prune_mask]
+            items_np = items_np[prune_mask]
+            print("Prune sonrası toplam etkileşim sayısı:", len(users_np))
         if is_subgraph and self.ssl_ratio > 0:
             if aug_type == 'nd':
                 drop_user_idx = randint_choice(self.num_users, size=self.num_users * self.ssl_ratio, replace=False)
