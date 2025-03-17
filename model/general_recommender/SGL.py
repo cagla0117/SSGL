@@ -198,8 +198,8 @@ class SGL(AbstractRecommender):
             self.lightgcn.reset_parameters(init_method=self.param_init)
         self.optimizer = torch.optim.Adam(self.lightgcn.parameters(), lr=self.lr)
 
-    @timer
-    def create_adj_mat(self, is_subgraph=False, aug_type='ed',prune=True):
+ 
+    def create_adj_mat(self, is_subgraph=False, aug_type='ed', prune=True):
         n_nodes = self.num_users + self.num_items
         users_items = self.dataset.train_data.to_user_item_pairs()
         users_np, items_np = users_items[:, 0], users_items[:, 1]
@@ -207,17 +207,28 @@ class SGL(AbstractRecommender):
         if prune:
             print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
 
-            # Kullanıcı başına etkileşim sayısını hesapla
+            # Kullanıcı başına etkileşim sayılarını hesapla
             unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
 
-            # 5'ten az etkileşimi olan kullanıcıları bul
-            users_to_prune = unique_users[user_interaction_counts < 25]
+            # Dinamik alpha hesaplama (Ortalama - 2 * Standart Sapma)
+            mean_interactions = np.mean(user_interaction_counts)
+            std_interactions = np.std(user_interaction_counts)
+            alpha = max(1, int(mean_interactions - 1 * 3*std_interactions/8))  # Negatif olmaması için min 1 sınırı
+            alpha = 15
+            print(f"📊 Kullanıcı başına ortalama etkileşim: {mean_interactions:.2f}")
+            print(f"📊 Kullanıcı başına etkileşim standart sapması: {std_interactions:.2f}")
+            print(f"Dinamik prune için belirlenen alpha değeri: {alpha}")
+
+            # Alpha'dan düşük etkileşimi olan kullanıcıları belirle
+            users_to_prune = unique_users[user_interaction_counts < alpha]
 
             # Bu kullanıcıların etkileşimlerini kaldır
             prune_mask = np.isin(users_np, users_to_prune, invert=True)
             users_np = users_np[prune_mask]
             items_np = items_np[prune_mask]
+
             print("Prune sonrası toplam etkileşim sayısı:", len(users_np))
+
         if is_subgraph and self.ssl_ratio > 0:
             if aug_type == 'nd':
                 drop_user_idx = randint_choice(self.num_users, size=self.num_users * self.ssl_ratio, replace=False)
@@ -244,9 +255,10 @@ class SGL(AbstractRecommender):
         else:
             ratings = np.ones_like(users_np, dtype=np.float32)
             tmp_adj = sp.csr_matrix((ratings, (users_np, items_np+self.num_users)), shape=(n_nodes, n_nodes))
+
         adj_mat = tmp_adj + tmp_adj.T
 
-        # normalize adjcency matrix
+        # normalize adjacency matrix
         rowsum = np.array(adj_mat.sum(1))
         d_inv = np.power(rowsum, -0.5).flatten()
         d_inv[np.isinf(d_inv)] = 0.
@@ -255,6 +267,7 @@ class SGL(AbstractRecommender):
         adj_matrix = norm_adj_tmp.dot(d_mat_inv)
 
         return adj_matrix
+
 
     def train_model(self):
         data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)                    
