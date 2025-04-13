@@ -208,7 +208,7 @@ class SGL(AbstractRecommender):
         users_np, items_np = users_items[:, 0], users_items[:, 1]
         prune = False
         n_clusters=10
-        outlier_threshold=1
+        outlier_threshold=2
         cluster_pruning = True
         if prune:
             print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
@@ -225,7 +225,7 @@ class SGL(AbstractRecommender):
             print(f"📊 Kullanıcı başına etkileşim standart sapması: {std_interactions:.2f}")
             print(f"Dinamik prune için belirlenen alpha değeri: {alpha}")
             short_tail = False
-            long_tail = True
+            long_tail = False
             if short_tail == True:
                 # Alpha'dan düşük etkileşimi olan kullanıcıları belirle
                 users_to_prune = unique_users[user_interaction_counts < alpha]
