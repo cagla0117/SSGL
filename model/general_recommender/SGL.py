@@ -10,6 +10,9 @@ __email__ = "wujcan@gmail.com"
 __all__ = ["SGL"]
 
 import torch
+from sklearn.cluster import KMeans
+import numpy as np
+import scipy.sparse as sp
 from torch.serialization import save
 import torch.sparse as torch_sp
 import torch.nn as nn
@@ -203,7 +206,10 @@ class SGL(AbstractRecommender):
         n_nodes = self.num_users + self.num_items
         users_items = self.dataset.train_data.to_user_item_pairs()
         users_np, items_np = users_items[:, 0], users_items[:, 1]
-        
+        prune = False
+        n_clusters=10
+        outlier_threshold=2
+        cluster_pruning = True
         if prune:
             print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
 
@@ -218,15 +224,78 @@ class SGL(AbstractRecommender):
             print(f"📊 Kullanıcı başına ortalama etkileşim: {mean_interactions:.2f}")
             print(f"📊 Kullanıcı başına etkileşim standart sapması: {std_interactions:.2f}")
             print(f"Dinamik prune için belirlenen alpha değeri: {alpha}")
+            short_tail = False
+            long_tail = False
+            if short_tail == True:
+                # Alpha'dan düşük etkileşimi olan kullanıcıları belirle
+                users_to_prune = unique_users[user_interaction_counts < alpha]
 
-            # Alpha'dan düşük etkileşimi olan kullanıcıları belirle
-            users_to_prune = unique_users[user_interaction_counts < alpha]
+                # Bu kullanıcıların etkileşimlerini kaldır
+                prune_mask = np.isin(users_np, users_to_prune, invert=True)
+                users_np = users_np[prune_mask]
+                items_np = items_np[prune_mask]
+            if long_tail == True :
+                unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
 
-            # Bu kullanıcıların etkileşimlerini kaldır
-            prune_mask = np.isin(users_np, users_to_prune, invert=True)
+                # Etkileşimi alpha'dan büyük olan kullanıcıları belirle
+                users_to_boost = unique_users[user_interaction_counts > alpha]
+                users_to_boost = unique_users[user_interaction_counts < alpha]
+
+                # Alpha’dan küçük etkileşimi olan kullanıcıların etkileşimlerini ikiyle çarp (aynı etkileşimi tekrar ekleyerek)
+                boost_mask = np.isin(users_np, users_to_boost)
+
+                # Bu kullanıcıların etkileşimlerini iki kez ekleyerek etkisini artırıyoruz
+                users_np = np.concatenate([users_np, users_np[boost_mask]])
+                items_np = np.concatenate([items_np, items_np[boost_mask]])
+
+        if cluster_pruning:
+            print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
+            
+            # Kullanıcı-Öğe Sparse Matrisi
+            user_item_matrix = sp.csr_matrix(
+                (np.ones_like(users_np, dtype=np.float32), (users_np, items_np)),
+                shape=(self.num_users, self.num_items)
+            )
+
+            # **Öğeleri (Items) Kümelere Ayır**
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            item_clusters = kmeans.fit_predict(user_item_matrix.T.toarray())  # Transpose, çünkü öğeleri kümeliyoruz
+
+            # **Her Kümedeki Öğelerin Bağlantı Sayısını Hesapla**
+            item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
+            cluster_interactions = {i: [] for i in range(n_clusters)}
+
+            for item in range(self.num_items):
+                cluster_id = item_cluster_map[item]
+                total_connections = user_item_matrix[:, item].sum()
+                cluster_interactions[cluster_id].append((item, total_connections))
+
+            # **Her Kümede Gürültü Olan Öğeleri Belirle**
+            noise_edges = set()
+            for cluster_id, item_list in cluster_interactions.items():
+                if len(item_list) < 2:  # Tek bir öğe varsa kıyaslama yapamayız
+                    continue
+                
+                total_connections = np.array([count for _, count in item_list])
+                mean_connections = np.mean(total_connections)
+                threshold = mean_connections * outlier_threshold  # Ortalama bağlantı sayısının %20'si alt sınır
+
+                for item, count in item_list:
+                    if count < threshold:
+                        # Gürültü olarak işaretlenmiş öğenin, sadece bu kümedeki bağlantılarını silmeliyiz
+                        affected_users = np.where(items_np == item)[0]  # Bu öğeye bağlanan kullanıcıları bul
+                        for user_idx in affected_users:
+                            if item_cluster_map[items_np[user_idx]] == cluster_id:  # Sadece bu kümede gürültü ise sil
+                                noise_edges.add(user_idx)
+
+            # Gürültü olan **bağlantıları** kaldır (öğelerin tamamını değil)
+            prune_mask = np.ones(len(users_np), dtype=bool)
+            prune_mask[list(noise_edges)] = False  # Gürültü olan bağlantıları kaldır
             users_np = users_np[prune_mask]
             items_np = items_np[prune_mask]
 
+            print(f"🔹 Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
+            print("🔹 Prune sonrası toplam etkileşim sayısı:", len(users_np))
             print("Prune sonrası toplam etkileşim sayısı:", len(users_np))
 
         if is_subgraph and self.ssl_ratio > 0:
