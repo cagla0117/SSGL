@@ -7,6 +7,8 @@ import sys
 import numpy as np
 import random
 import torch
+import time
+
 
 def _set_random_seed(seed=2020):
     
@@ -45,6 +47,7 @@ def find_recommender(recommender):
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     is_windows = sys.platform.startswith('win')
     if is_windows:
         root_dir = os.path.abspath(os.path.dirname(__file__))  # Geçerli dizini otomatik alır
@@ -57,6 +60,7 @@ if __name__ == "__main__":
     config.parse_cmd()
     os.environ['CUDA_VISIBLE_DEVICES'] = str(config["gpu_id"])
     _set_random_seed(config["seed"])
+    
     Recommender = find_recommender(config.recommender)
 
     model_cfg = os.path.join(root_dir, "conf", config.recommender + ".ini")
@@ -64,3 +68,6 @@ if __name__ == "__main__":
 
     recommender = Recommender(config)
     recommender.train_model()
+    end_time = time.time()  # 🔹 Bitiş zamanı
+    elapsed_time = (end_time - start_time)/ 60
+    print(f"\n⏱️ Total training time: {elapsed_time:.2f} seconds")

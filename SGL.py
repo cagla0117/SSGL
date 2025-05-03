@@ -1,10 +1,6 @@
-"""
-Paper: Self-supervised Graph Learning for Recommendation
-Author: Jiancan Wu, Xiang Wang, Fuli Feng, Xiangnan He, Liang Chen, Jianxun Lian, and Xing Xie
-Reference: https://github.com/wujcan/SGL-Torch
-"""
-from sklearn.cluster import MiniBatchKMeans
 
+
+__all__ = ["SGL"]
 
 import torch
 from sklearn.cluster import KMeans
@@ -12,8 +8,6 @@ import numpy as np
 import scipy.sparse as sp
 from torch.serialization import save
 import torch.sparse as torch_sp
-from data.dataset import Interaction
-import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from model.base import AbstractRecommender
@@ -28,6 +22,56 @@ import scipy.sparse as sp
 from util.common import normalize_adj_matrix, ensureDir
 from util.pytorch import sp_mat_to_sp_tensor
 from reckit import randint_choice
+import math
+
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        device = t.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
+        return emb
+
+
+class UNetDenoiser(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.time_embed = SinusoidalPosEmb(dim)
+        self.net = nn.Sequential(
+            nn.Linear(dim + dim, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim)
+        )
+
+    def forward(self, x, t):
+        t_emb = self.time_embed(t.float())  # t: timestep
+        x_in = torch.cat([x, t_emb], dim=-1)
+        return self.net(x_in)
+
+class DiffusionDenoiser(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),
+            nn.Linear(dim * 2, dim)
+        )
+
+
+
+    def forward(self, x, noise_level=0.1):
+        noise = torch.randn_like(x) * noise_level
+        x_noisy = x + noise
+        x_recon = self.net(x_noisy)
+        return x_recon
 
 
 class _LightGCN(nn.Module):
@@ -43,9 +87,22 @@ class _LightGCN(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self._user_embeddings_final = None
         self._item_embeddings_final = None
+        self.denoiser_user = DiffusionDenoiser(embed_dim)
+        self.denoiser_item = DiffusionDenoiser(embed_dim)
+        self.unet_user = UNetDenoiser(embed_dim)
+        self.unet_item = UNetDenoiser(embed_dim)
+
 
         # # weight initialization
         # self.reset_parameters()
+    def denoise_with_diffusion(self, x, unet, steps=10):
+        batch_size = x.shape[0]
+        for t in reversed(range(steps)):
+            t_tensor = torch.full((batch_size,), t, device=x.device, dtype=torch.long)
+            noise = torch.randn_like(x) * (0.1 + 0.9 * t / steps)  # β schedule
+            x_noisy = x + noise
+            x = unet(x_noisy, t_tensor)
+        return x
 
     def reset_parameters(self, pretrain=0, init_method="uniform", dir=None):
         if pretrain:
@@ -62,6 +119,8 @@ class _LightGCN(nn.Module):
 
     def forward(self, sub_graph1, sub_graph2, users, items, neg_items):
         user_embeddings, item_embeddings = self._forward_gcn(self.norm_adj)
+        user_embeddings = self.denoiser_user(user_embeddings)
+        item_embeddings = self.denoiser_item(item_embeddings)
         user_embeddings1, item_embeddings1 = self._forward_gcn(sub_graph1)
         user_embeddings2, item_embeddings2 = self._forward_gcn(sub_graph2)
 
@@ -94,7 +153,6 @@ class _LightGCN(nn.Module):
         ssl_logits_item = tot_ratings_item - pos_ratings_item[:, None]                  # [batch_size, num_users]
 
         return sup_logits, ssl_logits_user, ssl_logits_item
-
     def _forward_gcn(self, norm_adj):
         ego_embeddings = torch.cat([self.user_embeddings.weight, self.item_embeddings.weight], dim=0)
         all_embeddings = [ego_embeddings]
@@ -108,8 +166,9 @@ class _LightGCN(nn.Module):
 
         all_embeddings = torch.stack(all_embeddings, dim=1).mean(dim=1)
         user_embeddings, item_embeddings = torch.split(all_embeddings, [self.num_users, self.num_items], dim=0)
-
+        
         return user_embeddings, item_embeddings
+
 
     def predict(self, users):
         if self._user_embeddings_final is None or self._item_embeddings_final is None:
@@ -121,7 +180,12 @@ class _LightGCN(nn.Module):
 
     def eval(self):
         super(_LightGCN, self).eval()
-        self._user_embeddings_final, self._item_embeddings_final = self._forward_gcn(self.norm_adj)
+        user_embs, item_embs = self._forward_gcn(self.norm_adj)
+        self._user_embeddings_final = self.denoise_with_diffusion(user_embs, self.unet_user, steps=10)
+        self._item_embeddings_final = self.denoise_with_diffusion(item_embs, self.unet_item, steps=10)
+
+
+
 
 
 class SGL(AbstractRecommender):
@@ -143,15 +207,6 @@ class SGL(AbstractRecommender):
         self.learner = config["learner"]
         self.lr = config['lr']
         self.param_init = config["param_init"]
-        self.do_prune = config["do_prune"]
-        self.do_cluster_prune = config["do_cluster_prune"]
-        self.do_short_tail = config["do_short_tail"]
-        self.do_long_tail = config["do_long_tail"]
-        self.alpha = config["alpha"]
-        self.n_clusters = config["n_clusters"]
-        self.outlier_threshold = config["outlier_threshold"]
-
-
 
         # Hyper-parameters for GCN
         self.n_layers = config['n_layers']
@@ -196,92 +251,6 @@ class SGL(AbstractRecommender):
             ensureDir(self.save_dir)
 
         self.num_users, self.num_items, self.num_ratings = self.dataset.num_users, self.dataset.num_items, self.dataset.num_train_ratings
-        # ============ Opsiyonel Pruning ve Cluster Pruning Başlangıçta ============
-        do_prune = self.do_prune
-        do_cluster_prune = self.do_cluster_prune
-        do_short_tail = self.do_short_tail
-        do_long_tail = self.do_long_tail
-        alpha = self.alpha  # yerine yaz
-        n_clusters = self.n_clusters  # yerine yaz
-        outlier_threshold = self.outlier_threshold  # yerine yaz
-
-
-
-        if do_prune or do_cluster_prune or do_short_tail or do_long_tail:
-            users_items = self.dataset.train_data.to_user_item_pairs()
-            users_np, items_np = users_items[:, 0], users_items[:, 1]
-
-            if do_cluster_prune:
-                print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
-                user_item_matrix = sp.csr_matrix(
-                    (np.ones_like(users_np, dtype=np.float32), (users_np, items_np)),
-                    shape=(self.num_users, self.num_items)
-                )
-             
-                kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, max_iter=100)
-                item_clusters = kmeans.fit_predict(user_item_matrix.T)
-                item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
-
-                cluster_interactions = {i: [] for i in range(n_clusters)}
-                for item in range(self.num_items):
-                    cluster_id = item_cluster_map[item]
-                    total_connections = user_item_matrix[:, item].sum()
-                    cluster_interactions[cluster_id].append((item, total_connections))
-
-                noise_edges = set()
-                for cluster_id, item_list in cluster_interactions.items():
-                    if len(item_list) < 2:
-                        continue
-                    total_connections = np.array([count for _, count in item_list])
-                    mean_connections = np.mean(total_connections)
-                    threshold = mean_connections * outlier_threshold
-                    for item, count in item_list:
-                        if count < threshold:
-                            affected_users = np.where(items_np == item)[0]
-                            for user_idx in affected_users:
-                                if item_cluster_map[items_np[user_idx]] == cluster_id:
-                                    noise_edges.add(user_idx)
-
-                prune_mask = np.ones(len(users_np), dtype=bool)
-                prune_mask[list(noise_edges)] = False
-                users_np = users_np[prune_mask]
-                items_np = items_np[prune_mask]
-
-            if do_prune or do_short_tail or do_long_tail:
-                print("📦 Kullanıcı başına etkileşim temelli pruning başlatılıyor...")
-                unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
-                mean_interactions = np.mean(user_interaction_counts)
-                std_interactions = np.std(user_interaction_counts)
-               
-
-                if do_short_tail:
-                    users_to_prune = unique_users[user_interaction_counts < alpha]
-                    prune_mask = np.isin(users_np, users_to_prune, invert=True)
-                    users_np = users_np[prune_mask]
-                    items_np = items_np[prune_mask]
-
-                if do_long_tail:
-                    users_to_boost = unique_users[user_interaction_counts < alpha]
-                    boost_mask = np.isin(users_np, users_to_boost)
-                    users_np = np.concatenate([users_np, users_np[boost_mask]])
-                    items_np = np.concatenate([items_np, items_np[boost_mask]])
-
-                if do_prune and not (do_short_tail or do_long_tail):
-                    users_to_prune = unique_users[user_interaction_counts < alpha]
-                    prune_mask = np.isin(users_np, users_to_prune, invert=True)
-                    users_np = users_np[prune_mask]
-                    items_np = items_np[prune_mask]
-                    
-            print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
-
-            # 🔁 Güncellenmiş etkileşimleri Interaction formatına dönüştür
-            pruned_df = pd.DataFrame({ "user": users_np, "item": items_np })
-            self.dataset.train_data = Interaction(pruned_df, num_users=self.num_users, num_items=self.num_items)
-            self.dataset.num_train_ratings = len(pruned_df)    
-
-                            
-            print(f"Toplam etkileşim sayısı (pozitif): {len(self.dataset.train_data.to_user_item_pairs())}")
-
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         adj_matrix = self.create_adj_mat()
@@ -293,7 +262,13 @@ class SGL(AbstractRecommender):
             self.lightgcn.reset_parameters(pretrain=self.pretrain_flag, dir=self.save_dir)
         else:
             self.lightgcn.reset_parameters(init_method=self.param_init)
-        self.optimizer = torch.optim.Adam(self.lightgcn.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(
+            list(self.lightgcn.parameters()) +
+            list(self.lightgcn.unet_user.parameters()) +
+            list(self.lightgcn.unet_item.parameters()),
+            lr=self.lr
+        )
+
 
  
     def create_adj_mat(self, is_subgraph=False, aug_type='ed', prune=True):
@@ -352,10 +327,8 @@ class SGL(AbstractRecommender):
             )
 
             # **Öğeleri (Items) Kümelere Ayır**
-            #kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, max_iter=100)
-
-            item_clusters = kmeans.fit_predict(user_item_matrix.T)  # Transpose, çünkü öğeleri kümeliyoruz
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            item_clusters = kmeans.fit_predict(user_item_matrix.T.toarray())  # Transpose, çünkü öğeleri kümeliyoruz
 
             # **Her Kümedeki Öğelerin Bağlantı Sayısını Hesapla**
             item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
@@ -435,11 +408,7 @@ class SGL(AbstractRecommender):
 
 
     def train_model(self):
-        data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)
-
-        #data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)       
-        print(f"Toplam etkileşim sayısı (pozitif): {len(self.dataset.train_data.to_user_item_pairs())}")
-             
+        data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)                    
         self.logger.info(self.evaluator.metrics_info())
         stopping_step = 0
         for epoch in range(1, self.epochs + 1):
