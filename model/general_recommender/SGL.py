@@ -12,6 +12,8 @@ import numpy as np
 import scipy.sparse as sp
 from torch.serialization import save
 import torch.sparse as torch_sp
+from data.dataset import Interaction
+import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from model.base import AbstractRecommender
@@ -141,6 +143,15 @@ class SGL(AbstractRecommender):
         self.learner = config["learner"]
         self.lr = config['lr']
         self.param_init = config["param_init"]
+        self.do_prune = config["do_prune"]
+        self.do_cluster_prune = config["do_cluster_prune"]
+        self.do_short_tail = config["do_short_tail"]
+        self.do_long_tail = config["do_long_tail"]
+        self.alpha = config["alpha"]
+        self.n_clusters = config["n_clusters"]
+        self.outlier_threshold = config["outlier_threshold"]
+
+
 
         # Hyper-parameters for GCN
         self.n_layers = config['n_layers']
@@ -185,6 +196,92 @@ class SGL(AbstractRecommender):
             ensureDir(self.save_dir)
 
         self.num_users, self.num_items, self.num_ratings = self.dataset.num_users, self.dataset.num_items, self.dataset.num_train_ratings
+        # ============ Opsiyonel Pruning ve Cluster Pruning Başlangıçta ============
+        do_prune = self.do_prune
+        do_cluster_prune = self.do_cluster_prune
+        do_short_tail = self.do_short_tail
+        do_long_tail = self.do_long_tail
+        alpha = self.alpha  # yerine yaz
+        n_clusters = self.n_clusters  # yerine yaz
+        outlier_threshold = self.outlier_threshold  # yerine yaz
+
+
+
+        if do_prune or do_cluster_prune or do_short_tail or do_long_tail:
+            users_items = self.dataset.train_data.to_user_item_pairs()
+            users_np, items_np = users_items[:, 0], users_items[:, 1]
+
+            if do_cluster_prune:
+                print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
+                user_item_matrix = sp.csr_matrix(
+                    (np.ones_like(users_np, dtype=np.float32), (users_np, items_np)),
+                    shape=(self.num_users, self.num_items)
+                )
+             
+                kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, max_iter=100)
+                item_clusters = kmeans.fit_predict(user_item_matrix.T)
+                item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
+
+                cluster_interactions = {i: [] for i in range(n_clusters)}
+                for item in range(self.num_items):
+                    cluster_id = item_cluster_map[item]
+                    total_connections = user_item_matrix[:, item].sum()
+                    cluster_interactions[cluster_id].append((item, total_connections))
+
+                noise_edges = set()
+                for cluster_id, item_list in cluster_interactions.items():
+                    if len(item_list) < 2:
+                        continue
+                    total_connections = np.array([count for _, count in item_list])
+                    mean_connections = np.mean(total_connections)
+                    threshold = mean_connections * outlier_threshold
+                    for item, count in item_list:
+                        if count < threshold:
+                            affected_users = np.where(items_np == item)[0]
+                            for user_idx in affected_users:
+                                if item_cluster_map[items_np[user_idx]] == cluster_id:
+                                    noise_edges.add(user_idx)
+
+                prune_mask = np.ones(len(users_np), dtype=bool)
+                prune_mask[list(noise_edges)] = False
+                users_np = users_np[prune_mask]
+                items_np = items_np[prune_mask]
+
+            if do_prune or do_short_tail or do_long_tail:
+                print("📦 Kullanıcı başına etkileşim temelli pruning başlatılıyor...")
+                unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
+                mean_interactions = np.mean(user_interaction_counts)
+                std_interactions = np.std(user_interaction_counts)
+               
+
+                if do_short_tail:
+                    users_to_prune = unique_users[user_interaction_counts < alpha]
+                    prune_mask = np.isin(users_np, users_to_prune, invert=True)
+                    users_np = users_np[prune_mask]
+                    items_np = items_np[prune_mask]
+
+                if do_long_tail:
+                    users_to_boost = unique_users[user_interaction_counts < alpha]
+                    boost_mask = np.isin(users_np, users_to_boost)
+                    users_np = np.concatenate([users_np, users_np[boost_mask]])
+                    items_np = np.concatenate([items_np, items_np[boost_mask]])
+
+                if do_prune and not (do_short_tail or do_long_tail):
+                    users_to_prune = unique_users[user_interaction_counts < alpha]
+                    prune_mask = np.isin(users_np, users_to_prune, invert=True)
+                    users_np = users_np[prune_mask]
+                    items_np = items_np[prune_mask]
+                    
+            print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
+
+            # 🔁 Güncellenmiş etkileşimleri Interaction formatına dönüştür
+            pruned_df = pd.DataFrame({ "user": users_np, "item": items_np })
+            self.dataset.train_data = Interaction(pruned_df, num_users=self.num_users, num_items=self.num_items)
+            self.dataset.num_train_ratings = len(pruned_df)    
+
+                            
+            print(f"Toplam etkileşim sayısı (pozitif): {len(self.dataset.train_data.to_user_item_pairs())}")
+
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         adj_matrix = self.create_adj_mat()
@@ -206,7 +303,7 @@ class SGL(AbstractRecommender):
         prune = False
         n_clusters=10
         outlier_threshold=2
-        cluster_pruning = True
+        cluster_pruning = False
         if prune:
             print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
 
@@ -338,7 +435,11 @@ class SGL(AbstractRecommender):
 
 
     def train_model(self):
-        data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)                    
+        data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)
+
+        #data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)       
+        print(f"Toplam etkileşim sayısı (pozitif): {len(self.dataset.train_data.to_user_item_pairs())}")
+             
         self.logger.info(self.evaluator.metrics_info())
         stopping_step = 0
         for epoch in range(1, self.epochs + 1):

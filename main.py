@@ -60,6 +60,7 @@ if __name__ == "__main__":
     config.parse_cmd()
     os.environ['CUDA_VISIBLE_DEVICES'] = str(config["gpu_id"])
     _set_random_seed(config["seed"])
+    
     Recommender = find_recommender(config.recommender)
 
     model_cfg = os.path.join(root_dir, "conf", config.recommender + ".ini")
