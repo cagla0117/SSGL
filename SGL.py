@@ -1,10 +1,6 @@
-"""
-Paper: Self-supervised Graph Learning for Recommendation
-Author: Jiancan Wu, Xiang Wang, Fuli Feng, Xiangnan He, Liang Chen, Jianxun Lian, and Xing Xie
-Reference: https://github.com/wujcan/SGL-Torch
-"""
-from sklearn.cluster import MiniBatchKMeans
 
+
+__all__ = ["SGL"]
 
 import torch
 from sklearn.cluster import KMeans
@@ -26,6 +22,56 @@ import scipy.sparse as sp
 from util.common import normalize_adj_matrix, ensureDir
 from util.pytorch import sp_mat_to_sp_tensor
 from reckit import randint_choice
+import math
+
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        device = t.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
+        return emb
+
+
+class UNetDenoiser(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.time_embed = SinusoidalPosEmb(dim)
+        self.net = nn.Sequential(
+            nn.Linear(dim + dim, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim * 4),
+            nn.ReLU(),
+            nn.Linear(dim * 4, dim)
+        )
+
+    def forward(self, x, t):
+        t_emb = self.time_embed(t.float())  # t: timestep
+        x_in = torch.cat([x, t_emb], dim=-1)
+        return self.net(x_in)
+
+class DiffusionDenoiser(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.ReLU(),
+            nn.Linear(dim * 2, dim)
+        )
+
+
+
+    def forward(self, x, noise_level=0.1):
+        noise = torch.randn_like(x) * noise_level
+        x_noisy = x + noise
+        x_recon = self.net(x_noisy)
+        return x_recon
 
 
 class _LightGCN(nn.Module):
@@ -41,9 +87,22 @@ class _LightGCN(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self._user_embeddings_final = None
         self._item_embeddings_final = None
+        self.denoiser_user = DiffusionDenoiser(embed_dim)
+        self.denoiser_item = DiffusionDenoiser(embed_dim)
+        self.unet_user = UNetDenoiser(embed_dim)
+        self.unet_item = UNetDenoiser(embed_dim)
+
 
         # # weight initialization
         # self.reset_parameters()
+    def denoise_with_diffusion(self, x, unet, steps=10):
+        batch_size = x.shape[0]
+        for t in reversed(range(steps)):
+            t_tensor = torch.full((batch_size,), t, device=x.device, dtype=torch.long)
+            noise = torch.randn_like(x) * (0.1 + 0.9 * t / steps)  # β schedule
+            x_noisy = x + noise
+            x = unet(x_noisy, t_tensor)
+        return x
 
     def reset_parameters(self, pretrain=0, init_method="uniform", dir=None):
         if pretrain:
@@ -60,6 +119,8 @@ class _LightGCN(nn.Module):
 
     def forward(self, sub_graph1, sub_graph2, users, items, neg_items):
         user_embeddings, item_embeddings = self._forward_gcn(self.norm_adj)
+        user_embeddings = self.denoiser_user(user_embeddings)
+        item_embeddings = self.denoiser_item(item_embeddings)
         user_embeddings1, item_embeddings1 = self._forward_gcn(sub_graph1)
         user_embeddings2, item_embeddings2 = self._forward_gcn(sub_graph2)
 
@@ -92,7 +153,6 @@ class _LightGCN(nn.Module):
         ssl_logits_item = tot_ratings_item - pos_ratings_item[:, None]                  # [batch_size, num_users]
 
         return sup_logits, ssl_logits_user, ssl_logits_item
-
     def _forward_gcn(self, norm_adj):
         ego_embeddings = torch.cat([self.user_embeddings.weight, self.item_embeddings.weight], dim=0)
         all_embeddings = [ego_embeddings]
@@ -106,8 +166,9 @@ class _LightGCN(nn.Module):
 
         all_embeddings = torch.stack(all_embeddings, dim=1).mean(dim=1)
         user_embeddings, item_embeddings = torch.split(all_embeddings, [self.num_users, self.num_items], dim=0)
-
+        
         return user_embeddings, item_embeddings
+
 
     def predict(self, users):
         if self._user_embeddings_final is None or self._item_embeddings_final is None:
@@ -119,7 +180,12 @@ class _LightGCN(nn.Module):
 
     def eval(self):
         super(_LightGCN, self).eval()
-        self._user_embeddings_final, self._item_embeddings_final = self._forward_gcn(self.norm_adj)
+        user_embs, item_embs = self._forward_gcn(self.norm_adj)
+        self._user_embeddings_final = self.denoise_with_diffusion(user_embs, self.unet_user, steps=10)
+        self._item_embeddings_final = self.denoise_with_diffusion(item_embs, self.unet_item, steps=10)
+
+
+
 
 
 class SGL(AbstractRecommender):
@@ -196,7 +262,13 @@ class SGL(AbstractRecommender):
             self.lightgcn.reset_parameters(pretrain=self.pretrain_flag, dir=self.save_dir)
         else:
             self.lightgcn.reset_parameters(init_method=self.param_init)
-        self.optimizer = torch.optim.Adam(self.lightgcn.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(
+            list(self.lightgcn.parameters()) +
+            list(self.lightgcn.unet_user.parameters()) +
+            list(self.lightgcn.unet_item.parameters()),
+            lr=self.lr
+        )
+
 
  
     def create_adj_mat(self, is_subgraph=False, aug_type='ed', prune=True):
@@ -206,7 +278,7 @@ class SGL(AbstractRecommender):
         prune = False
         n_clusters=10
         outlier_threshold=2
-        cluster_pruning = True
+        cluster_pruning = False
         if prune:
             print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
 
@@ -255,10 +327,8 @@ class SGL(AbstractRecommender):
             )
 
             # **Öğeleri (Items) Kümelere Ayır**
-            #kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, max_iter=100)
-
-            item_clusters = kmeans.fit_predict(user_item_matrix.T)  # Transpose, çünkü öğeleri kümeliyoruz
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            item_clusters = kmeans.fit_predict(user_item_matrix.T.toarray())  # Transpose, çünkü öğeleri kümeliyoruz
 
             # **Her Kümedeki Öğelerin Bağlantı Sayısını Hesapla**
             item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
