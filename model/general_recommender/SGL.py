@@ -213,11 +213,12 @@ class SGL(AbstractRecommender):
 
             if do_cluster_prune:
                 print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
+
                 user_item_matrix = sp.csr_matrix(
                     (np.ones_like(users_np, dtype=np.float32), (users_np, items_np)),
                     shape=(self.num_users, self.num_items)
                 )
-             
+
                 kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, max_iter=100)
                 item_clusters = kmeans.fit_predict(user_item_matrix.T)
                 item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
@@ -228,6 +229,11 @@ class SGL(AbstractRecommender):
                     total_connections = user_item_matrix[:, item].sum()
                     cluster_interactions[cluster_id].append((item, total_connections))
 
+                # 🔢 Her kullanıcı ve öğe için etkileşim sayılarını hesapla
+                from collections import Counter
+                user_interaction_count = Counter(users_np)
+                item_interaction_count = Counter(items_np)
+
                 noise_edges = set()
                 for cluster_id, item_list in cluster_interactions.items():
                     if len(item_list) < 2:
@@ -235,18 +241,24 @@ class SGL(AbstractRecommender):
                     total_connections = np.array([count for _, count in item_list])
                     mean_connections = np.mean(total_connections)
                     threshold = mean_connections * outlier_threshold
+
                     for item, count in item_list:
                         if count < threshold:
                             affected_users = np.where(items_np == item)[0]
                             for user_idx in affected_users:
                                 if item_cluster_map[items_np[user_idx]] == cluster_id:
-                                    noise_edges.add(user_idx)
+                                    user_id = users_np[user_idx]
+                                    item_id = items_np[user_idx]
+                                    if user_interaction_count[user_id] > 1 and item_interaction_count[item_id] > 1:
+                                        noise_edges.add(user_idx)
 
                 prune_mask = np.ones(len(users_np), dtype=bool)
                 prune_mask[list(noise_edges)] = False
                 users_np = users_np[prune_mask]
                 items_np = items_np[prune_mask]
 
+                print(f"✅ Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
+                print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
             if do_prune or do_short_tail or do_long_tail:
                 print("📦 Kullanıcı başına etkileşim temelli pruning başlatılıyor...")
                 unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
