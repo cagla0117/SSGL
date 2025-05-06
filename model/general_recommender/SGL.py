@@ -162,6 +162,10 @@ class SGL(AbstractRecommender):
         self.noise_min = config["noise_min"] if "noise_min" in config else 0.0001
         self.noise_max = config["noise_max"] if "noise_max" in config else 0.02
         self.mean_type = config["mean_type"] if "mean_type" in config else "epsilon"
+        self.best_result = np.array([0.0, 0.0, 0.0])  # Precision, Recall, NDCG
+        self.best_result_prec_all = [0.0, 0.0, 0.0]
+        self.best_result_recall_all = [0.0, 0.0, 0.0]
+        self.best_result_ndcg_all = [0.0, 0.0, 0.0]
 
 
 
@@ -180,7 +184,6 @@ class SGL(AbstractRecommender):
 
         # Other hyper-parameters
         self.best_epoch = 0
-        self.best_result = np.zeros([2], dtype=float)
 
         self.model_str = '#layers=%d-reg=%.0e' % (
             self.n_layers,
@@ -488,6 +491,7 @@ class SGL(AbstractRecommender):
         self.logger.info(self.evaluator.metrics_info())
         stopping_step = 0
         for epoch in range(1, self.epochs + 1):
+            self.current_epoch = epoch
             total_loss, total_bpr_loss, total_reg_loss,loss2 = 0.0, 0.0, 0.0,0.0
             training_start_time = time()
             if self.ssl_aug_type in ['nd', 'ed']:
@@ -584,16 +588,40 @@ class SGL(AbstractRecommender):
         else:
             buf = '\t'.join([("%.4f" % x).ljust(12) for x in self.best_result])
         self.logger.info("\t\t%s" % buf)
+        self.logger.info("🔚 Best Epoch Results:")
+        self.logger.info(f"Precision@20 max at epoch {self.best_epoch_prec}: {self.best_result_prec_all}")
+        self.logger.info(f"Recall@20 max at epoch {self.best_epoch_recall}: {self.best_result_recall_all}")
+        self.logger.info(f"NDCG@20 max at epoch {self.best_epoch_ndcg}: {self.best_result_ndcg_all}")
 
-    # @timer
+
+        # @timer
     def evaluate_model(self):
-        flag = False
         self.lightgcn.eval()
-        current_result, buf = self.evaluator.evaluate(self)
-        if self.best_result[1] < current_result[1]:
-            self.best_result = current_result
-            flag = True
+        current_result, buf = self.evaluator.evaluate(self)  # bu [P@20, R@20, NDCG@20]
+        
+        flag = False
+
+        if current_result[0] > self.best_result[0]:  # Precision@20
+            self.best_result[0] = current_result[0]
+            self.best_epoch_prec = self.current_epoch
+            self.best_result_prec_all = current_result.copy()
+            self.logger.info(f"🎯 New best Precision@20 at epoch {self.current_epoch:.0f}")
+
+        if current_result[1] > self.best_result[1]:  # Recall@20
+            self.best_result[1] = current_result[1]
+            self.best_epoch_recall = self.current_epoch
+            self.best_result_recall_all = current_result.copy()
+            self.logger.info(f"📈 New best Recall@20 at epoch {self.current_epoch:.0f}")
+            flag = True  # sadece recall erken durdurma için kullanılıyor
+
+        if current_result[2] > self.best_result[2]:  # NDCG@20
+            self.best_result[2] = current_result[2]
+            self.best_epoch_ndcg = self.current_epoch
+            self.best_result_ndcg_all = current_result.copy()
+            self.logger.info(f"🌟 New best NDCG@20 at epoch {self.current_epoch:.0f}")
+
         return buf, flag
+
 
     def predict(self, users):
         users = torch.from_numpy(np.asarray(users)).long().to(self.device)
