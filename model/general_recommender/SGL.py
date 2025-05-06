@@ -1,10 +1,7 @@
-"""
-Paper: Self-supervised Graph Learning for Recommendation
-Author: Jiancan Wu, Xiang Wang, Fuli Feng, Xiangnan He, Liang Chen, Jianxun Lian, and Xing Xie
-Reference: https://github.com/wujcan/SGL-Torch
-"""
+
 from sklearn.cluster import MiniBatchKMeans
 
+from datetime import datetime
 
 import torch
 from sklearn.cluster import KMeans
@@ -229,7 +226,7 @@ class SGL(AbstractRecommender):
             users_np, items_np = users_items[:, 0], users_items[:, 1]
 
             if do_cluster_prune:
-                print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
+                print(" Kümeleme tabanlı pruning başlatılıyor...")
 
                 user_item_matrix = sp.csr_matrix(
                     (np.ones_like(users_np, dtype=np.float32), (users_np, items_np)),
@@ -274,10 +271,10 @@ class SGL(AbstractRecommender):
                 users_np = users_np[prune_mask]
                 items_np = items_np[prune_mask]
 
-                print(f"✅ Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
-                print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
+                print(f" Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
+                print(f"Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
             if do_prune or do_short_tail or do_long_tail:
-                print("📦 Kullanıcı başına etkileşim temelli pruning başlatılıyor...")
+                print(" Kullanıcı başına etkileşim temelli pruning başlatılıyor...")
                 unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
                 mean_interactions = np.mean(user_interaction_counts)
                 std_interactions = np.std(user_interaction_counts)
@@ -301,7 +298,7 @@ class SGL(AbstractRecommender):
                     users_np = users_np[prune_mask]
                     items_np = items_np[prune_mask]
                     
-            print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
+            print(f" Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
 
             # 🔁 Güncellenmiş etkileşimleri Interaction formatına dönüştür
             pruned_df = pd.DataFrame({ "user": users_np, "item": items_np })
@@ -363,8 +360,8 @@ class SGL(AbstractRecommender):
             std_interactions = np.std(user_interaction_counts)
             alpha = max(1, int(mean_interactions - 1 * 3*std_interactions/8))  # Negatif olmaması için min 1 sınırı
             alpha = 15
-            print(f"📊 Kullanıcı başına ortalama etkileşim: {mean_interactions:.2f}")
-            print(f"📊 Kullanıcı başına etkileşim standart sapması: {std_interactions:.2f}")
+            print(f" Kullanıcı başına ortalama etkileşim: {mean_interactions:.2f}")
+            print(f" Kullanıcı başına etkileşim standart sapması: {std_interactions:.2f}")
             print(f"Dinamik prune için belirlenen alpha değeri: {alpha}")
             short_tail = False
             long_tail = False
@@ -391,7 +388,7 @@ class SGL(AbstractRecommender):
                 items_np = np.concatenate([items_np, items_np[boost_mask]])
 
         if cluster_pruning:
-            print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
+            print(" Kümeleme tabanlı pruning başlatılıyor...")
             
             # Kullanıcı-Öğe Sparse Matrisi
             user_item_matrix = sp.csr_matrix(
@@ -438,8 +435,8 @@ class SGL(AbstractRecommender):
             users_np = users_np[prune_mask]
             items_np = items_np[prune_mask]
 
-            print(f"🔹 Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
-            print("🔹 Prune sonrası toplam etkileşim sayısı:", len(users_np))
+            print(f" Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
+            print(" Prune sonrası toplam etkileşim sayısı:", len(users_np))
             print("Prune sonrası toplam etkileşim sayısı:", len(users_np))
 
         if is_subgraph and self.ssl_ratio > 0:
@@ -491,6 +488,8 @@ class SGL(AbstractRecommender):
         self.logger.info(self.evaluator.metrics_info())
         stopping_step = 0
         for epoch in range(1, self.epochs + 1):
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.logger.info(f"[{now}] Starting epoch {epoch}")
             self.current_epoch = epoch
             total_loss, total_bpr_loss, total_reg_loss,loss2 = 0.0, 0.0, 0.0,0.0
             training_start_time = time()
@@ -521,7 +520,7 @@ class SGL(AbstractRecommender):
                     emb_stack = torch.cat([user_embs, item_embs], dim=1)
                     diffusion_out = self.diff_model.training_losses(self.dnn, emb_stack)
                     diffusion_loss = diffusion_out["loss"].mean()
-                    print(f"[DIFF] loss: {diffusion_loss.item()}")
+                    #print(f"[DIFF] loss: {diffusion_loss.item()}")
                     # 👇 DNN için ayrı optimizasyon yap (gerekirse retain_graph=True ekle)
                     self.diff_optimizer.zero_grad()
                     diffusion_loss.backward(retain_graph=True)
@@ -588,7 +587,7 @@ class SGL(AbstractRecommender):
         else:
             buf = '\t'.join([("%.4f" % x).ljust(12) for x in self.best_result])
         self.logger.info("\t\t%s" % buf)
-        self.logger.info("🔚 Best Epoch Results:")
+        self.logger.info(" Best Epoch Results:")
         self.logger.info(f"Precision@20 max at epoch {self.best_epoch_prec}: {self.best_result_prec_all}")
         self.logger.info(f"Recall@20 max at epoch {self.best_epoch_recall}: {self.best_result_recall_all}")
         self.logger.info(f"NDCG@20 max at epoch {self.best_epoch_ndcg}: {self.best_result_ndcg_all}")
@@ -605,20 +604,20 @@ class SGL(AbstractRecommender):
             self.best_result[0] = current_result[0]
             self.best_epoch_prec = self.current_epoch
             self.best_result_prec_all = current_result.copy()
-            self.logger.info(f"🎯 New best Precision@20 at epoch {self.current_epoch:.0f}")
+            self.logger.info(f" New best Precision@20 at epoch {self.current_epoch:.0f}")
 
         if current_result[1] > self.best_result[1]:  # Recall@20
             self.best_result[1] = current_result[1]
             self.best_epoch_recall = self.current_epoch
             self.best_result_recall_all = current_result.copy()
-            self.logger.info(f"📈 New best Recall@20 at epoch {self.current_epoch:.0f}")
+            self.logger.info(f" New best Recall@20 at epoch {self.current_epoch:.0f}")
             flag = True  # sadece recall erken durdurma için kullanılıyor
 
         if current_result[2] > self.best_result[2]:  # NDCG@20
             self.best_result[2] = current_result[2]
             self.best_epoch_ndcg = self.current_epoch
             self.best_result_ndcg_all = current_result.copy()
-            self.logger.info(f"🌟 New best NDCG@20 at epoch {self.current_epoch:.0f}")
+            self.logger.info(f" New best NDCG@20 at epoch {self.current_epoch:.0f}")
 
         return buf, flag
 
