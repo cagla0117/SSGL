@@ -535,8 +535,7 @@ class SGL(AbstractRecommender):
                     self.diff_optimizer.zero_grad()
                     diffusion_loss.backward(retain_graph=True)
                     self.diff_optimizer.step()
-                    print(f"[Epoch {epoch}] Diffusion Loss: {diffusion_loss.item():.6f}")
-
+                    
                 """
                 if self.use_diffusion:
 
