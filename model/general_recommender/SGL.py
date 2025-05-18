@@ -513,10 +513,29 @@ class SGL(AbstractRecommender):
                 bat_neg_items = torch.from_numpy(bat_neg_items).long().to(self.device)
                 sup_logits, ssl_logits_user, ssl_logits_item, user_embs, item_embs = self.lightgcn(
                     sub_graph1, sub_graph2, bat_users, bat_pos_items, bat_neg_items)
-
                 if self.use_diffusion:
-                   
-                    
+                    # user_embs ve item_embs [batch_size, emb_dim] boyutunda
+                    emb_stack = torch.cat([user_embs, item_embs], dim=1)  # [batch_size, 2*emb_dim]
+
+                    # Reverse diffusion yoluyla rafine edilmiş gömülüler
+                    with torch.no_grad():  # sampling sırasında gradient gerekmez
+                        diffused_emb_stack = self.diff_model.p_sample(
+                            self.dnn, emb_stack, steps=self.diff_steps
+                        )
+
+                    # Geri ayır (rafine edilmiş halleri kullanıcı ve item için)
+                    user_embs, item_embs = (
+                        diffused_emb_stack[:, :self.emb_size],
+                        diffused_emb_stack[:, self.emb_size:]
+                    )
+                        # 💡 Ek olarak: diffusion ağı da optimize edilsin (DNN eğitilsin)
+                    diffusion_out = self.diff_model.training_losses(self.dnn, emb_stack)
+                    diffusion_loss = diffusion_out["loss"].mean()
+                    self.diff_optimizer.zero_grad()
+                    diffusion_loss.backward(retain_graph=True)
+                    self.diff_optimizer.step()
+                """
+                if self.use_diffusion:
 
                     emb_stack = torch.cat([user_embs, item_embs], dim=1)
                     diffusion_out = self.diff_model.training_losses(self.dnn, emb_stack)
@@ -524,7 +543,7 @@ class SGL(AbstractRecommender):
                     # 👇 DNN için ayrı optimizasyon yap (gerekirse retain_graph=True ekle)
                     self.diff_optimizer.zero_grad()
                     diffusion_loss.backward(retain_graph=True)
-                    self.diff_optimizer.step()
+                    self.diff_optimizer.step()"""
                 # BPR Loss
                 bpr_loss = -torch.sum(F.logsigmoid(sup_logits))
 
@@ -539,8 +558,8 @@ class SGL(AbstractRecommender):
                 clogits_user = torch.logsumexp(ssl_logits_user / self.ssl_temp, dim=1)
                 clogits_item = torch.logsumexp(ssl_logits_item / self.ssl_temp, dim=1)
                 infonce_loss = torch.sum(clogits_user + clogits_item)
-                
-                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss 
+                diffusion_weight = 0.1
+                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss
                 total_loss += loss
                 total_bpr_loss += bpr_loss
                 total_reg_loss += self.reg * reg_loss
