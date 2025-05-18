@@ -162,7 +162,8 @@ class GaussianDiffusion(nn.Module):
                 weight = th.where((ts == 0), 1.0, weight)
                 likelihood = mean_flat((x_start - self._predict_xstart_from_eps(x_t, ts, model_output))**2 / 2.0)
                 loss = th.where((ts == 0), likelihood, mse)
-         
+            else:
+                loss = mse
 
         else:
             weight = th.tensor([1.0] * len(target)).to(device)
