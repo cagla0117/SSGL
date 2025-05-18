@@ -28,9 +28,6 @@ import scipy.sparse as sp
 from util.common import normalize_adj_matrix, ensureDir
 from util.pytorch import sp_mat_to_sp_tensor
 from reckit import randint_choice
-from model.general_recommender.gaussian_diffusion import GaussianDiffusion, ModelMeanType
-from model.general_recommender.DNN import DNN
-
 
 
 class _LightGCN(nn.Module):
@@ -96,8 +93,7 @@ class _LightGCN(nn.Module):
         ssl_logits_user = tot_ratings_user - pos_ratings_user[:, None]                  # [batch_size, num_users]
         ssl_logits_item = tot_ratings_item - pos_ratings_item[:, None]                  # [batch_size, num_users]
 
-        return sup_logits, ssl_logits_user, ssl_logits_item, user_embs, item_embs
-
+        return sup_logits, ssl_logits_user, ssl_logits_item
 
     def _forward_gcn(self, norm_adj):
         ego_embeddings = torch.cat([self.user_embeddings.weight, self.item_embeddings.weight], dim=0)
@@ -154,20 +150,6 @@ class SGL(AbstractRecommender):
         self.alpha = config["alpha"]
         self.n_clusters = config["n_clusters"]
         self.outlier_threshold = config["outlier_threshold"]
-        # Diffusion parameters
-        self.use_diffusion = config["use_diffusion"] if "use_diffusion" in config else False
-        self.diff_steps = config["diff_steps"] if "diff_steps" in config else 100
-        self.noise_schedule = config["noise_schedule"] if "noise_schedule" in config else "linear"
-        self.noise_scale = config["noise_scale"] if "noise_scale" in config else 1.0
-        self.noise_min = config["noise_min"] if "noise_min" in config else 0.0001
-        self.noise_max = config["noise_max"] if "noise_max" in config else 0.02
-        self.mean_type = config["mean_type"] if "mean_type" in config else "epsilon"
-        self.best_result = np.array([0.0, 0.0, 0.0])  # Precision, Recall, NDCG
-        self.best_epoch_prec = 0
-        self.best_epoch_recall = 0
-        self.best_epoch_ndcg = 0
-
-
 
 
 
@@ -319,25 +301,6 @@ class SGL(AbstractRecommender):
 
         self.lightgcn = _LightGCN(self.num_users, self.num_items, self.emb_size,
                                   adj_matrix, self.n_layers).to(self.device)
-        if self.use_diffusion:
-            input_dim = 2 * self.emb_size  # sadece user + item embedding
-            self.dnn = DNN(
-                in_dims=[input_dim, 128],
-                out_dims=[128, input_dim],  # emb_stack boyutu = 2 * emb_size
-                emb_size=64  # timestep embedding ayrı alınacak
-            ).to(self.device)
-
-            self.diff_model = GaussianDiffusion(
-                mean_type=ModelMeanType[self.mean_type.upper()],
-                noise_schedule=self.noise_schedule,
-                noise_scale=self.noise_scale,
-                noise_min=self.noise_min,
-                noise_max=self.noise_max,
-                steps=self.diff_steps,
-                device=self.device
-            )
-            self.diff_optimizer = torch.optim.Adam(self.dnn.parameters(), lr=self.lr)
-
         if self.pretrain_flag:
             self.lightgcn.reset_parameters(pretrain=self.pretrain_flag, dir=self.save_dir)
         else:
@@ -492,7 +455,7 @@ class SGL(AbstractRecommender):
         self.logger.info(self.evaluator.metrics_info())
         stopping_step = 0
         for epoch in range(1, self.epochs + 1):
-            total_loss, total_bpr_loss, total_reg_loss,loss2 = 0.0, 0.0, 0.0,0.0
+            total_loss, total_bpr_loss, total_reg_loss = 0.0, 0.0, 0.0
             training_start_time = time()
             if self.ssl_aug_type in ['nd', 'ed']:
                 sub_graph1 = self.create_adj_mat(is_subgraph=True, aug_type=self.ssl_aug_type)
@@ -511,20 +474,9 @@ class SGL(AbstractRecommender):
                 bat_users = torch.from_numpy(bat_users).long().to(self.device)
                 bat_pos_items = torch.from_numpy(bat_pos_items).long().to(self.device)
                 bat_neg_items = torch.from_numpy(bat_neg_items).long().to(self.device)
-                sup_logits, ssl_logits_user, ssl_logits_item, user_embs, item_embs = self.lightgcn(
+                sup_logits, ssl_logits_user, ssl_logits_item = self.lightgcn(
                     sub_graph1, sub_graph2, bat_users, bat_pos_items, bat_neg_items)
-
-                if self.use_diffusion:
-                   
-                    
-
-                    emb_stack = torch.cat([user_embs, item_embs], dim=1)
-                    diffusion_out = self.diff_model.training_losses(self.dnn, emb_stack)
-                    diffusion_loss = diffusion_out["loss"].mean()
-                    # 👇 DNN için ayrı optimizasyon yap (gerekirse retain_graph=True ekle)
-                    self.diff_optimizer.zero_grad()
-                    diffusion_loss.backward(retain_graph=True)
-                    self.diff_optimizer.step()
+                
                 # BPR Loss
                 bpr_loss = -torch.sum(F.logsigmoid(sup_logits))
 
@@ -540,7 +492,7 @@ class SGL(AbstractRecommender):
                 clogits_item = torch.logsumexp(ssl_logits_item / self.ssl_temp, dim=1)
                 infonce_loss = torch.sum(clogits_user + clogits_item)
                 
-                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss 
+                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss
                 total_loss += loss
                 total_bpr_loss += bpr_loss
                 total_reg_loss += self.reg * reg_loss

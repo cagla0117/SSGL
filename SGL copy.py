@@ -12,8 +12,6 @@ import numpy as np
 import scipy.sparse as sp
 from torch.serialization import save
 import torch.sparse as torch_sp
-from data.dataset import Interaction
-import pandas as pd
 import torch.nn as nn
 import torch.nn.functional as F
 from model.base import AbstractRecommender
@@ -28,9 +26,6 @@ import scipy.sparse as sp
 from util.common import normalize_adj_matrix, ensureDir
 from util.pytorch import sp_mat_to_sp_tensor
 from reckit import randint_choice
-from model.general_recommender.gaussian_diffusion import GaussianDiffusion, ModelMeanType
-from model.general_recommender.DNN import DNN
-
 
 
 class _LightGCN(nn.Module):
@@ -96,8 +91,7 @@ class _LightGCN(nn.Module):
         ssl_logits_user = tot_ratings_user - pos_ratings_user[:, None]                  # [batch_size, num_users]
         ssl_logits_item = tot_ratings_item - pos_ratings_item[:, None]                  # [batch_size, num_users]
 
-        return sup_logits, ssl_logits_user, ssl_logits_item, user_embs, item_embs
-
+        return sup_logits, ssl_logits_user, ssl_logits_item
 
     def _forward_gcn(self, norm_adj):
         ego_embeddings = torch.cat([self.user_embeddings.weight, self.item_embeddings.weight], dim=0)
@@ -147,29 +141,6 @@ class SGL(AbstractRecommender):
         self.learner = config["learner"]
         self.lr = config['lr']
         self.param_init = config["param_init"]
-        self.do_prune = config["do_prune"]
-        self.do_cluster_prune = config["do_cluster_prune"]
-        self.do_short_tail = config["do_short_tail"]
-        self.do_long_tail = config["do_long_tail"]
-        self.alpha = config["alpha"]
-        self.n_clusters = config["n_clusters"]
-        self.outlier_threshold = config["outlier_threshold"]
-        # Diffusion parameters
-        self.use_diffusion = config["use_diffusion"] if "use_diffusion" in config else False
-        self.diff_steps = config["diff_steps"] if "diff_steps" in config else 100
-        self.noise_schedule = config["noise_schedule"] if "noise_schedule" in config else "linear"
-        self.noise_scale = config["noise_scale"] if "noise_scale" in config else 1.0
-        self.noise_min = config["noise_min"] if "noise_min" in config else 0.0001
-        self.noise_max = config["noise_max"] if "noise_max" in config else 0.02
-        self.mean_type = config["mean_type"] if "mean_type" in config else "epsilon"
-        self.best_result = np.array([0.0, 0.0, 0.0])  # Precision, Recall, NDCG
-        self.best_epoch_prec = 0
-        self.best_epoch_recall = 0
-        self.best_epoch_ndcg = 0
-
-
-
-
 
         # Hyper-parameters for GCN
         self.n_layers = config['n_layers']
@@ -214,104 +185,6 @@ class SGL(AbstractRecommender):
             ensureDir(self.save_dir)
 
         self.num_users, self.num_items, self.num_ratings = self.dataset.num_users, self.dataset.num_items, self.dataset.num_train_ratings
-        # ============ Opsiyonel Pruning ve Cluster Pruning Başlangıçta ============
-        do_prune = self.do_prune
-        do_cluster_prune = self.do_cluster_prune
-        do_short_tail = self.do_short_tail
-        do_long_tail = self.do_long_tail
-        alpha = self.alpha  # yerine yaz
-        n_clusters = self.n_clusters  # yerine yaz
-        outlier_threshold = self.outlier_threshold  # yerine yaz
-
-
-
-        if do_prune or do_cluster_prune or do_short_tail or do_long_tail:
-            users_items = self.dataset.train_data.to_user_item_pairs()
-            users_np, items_np = users_items[:, 0], users_items[:, 1]
-
-            if do_cluster_prune:
-                print("🔍 Kümeleme tabanlı pruning başlatılıyor...")
-
-                user_item_matrix = sp.csr_matrix(
-                    (np.ones_like(users_np, dtype=np.float32), (users_np, items_np)),
-                    shape=(self.num_users, self.num_items)
-                )
-
-                kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=42, batch_size=1024, max_iter=100)
-                item_clusters = kmeans.fit_predict(user_item_matrix.T)
-                item_cluster_map = {item: cluster for item, cluster in enumerate(item_clusters)}
-
-                cluster_interactions = {i: [] for i in range(n_clusters)}
-                for item in range(self.num_items):
-                    cluster_id = item_cluster_map[item]
-                    total_connections = user_item_matrix[:, item].sum()
-                    cluster_interactions[cluster_id].append((item, total_connections))
-
-                # 🔢 Her kullanıcı ve öğe için etkileşim sayılarını hesapla
-                from collections import Counter
-                user_interaction_count = Counter(users_np)
-                item_interaction_count = Counter(items_np)
-
-                noise_edges = set()
-                for cluster_id, item_list in cluster_interactions.items():
-                    if len(item_list) < 2:
-                        continue
-                    total_connections = np.array([count for _, count in item_list])
-                    mean_connections = np.mean(total_connections)
-                    threshold = mean_connections * outlier_threshold
-
-                    for item, count in item_list:
-                        if count < threshold:
-                            affected_users = np.where(items_np == item)[0]
-                            for user_idx in affected_users:
-                                if item_cluster_map[items_np[user_idx]] == cluster_id:
-                                    user_id = users_np[user_idx]
-                                    item_id = items_np[user_idx]
-                                    if user_interaction_count[user_id] > 1 and item_interaction_count[item_id] > 1:
-                                        noise_edges.add(user_idx)
-
-                prune_mask = np.ones(len(users_np), dtype=bool)
-                prune_mask[list(noise_edges)] = False
-                users_np = users_np[prune_mask]
-                items_np = items_np[prune_mask]
-
-                print(f"✅ Gürültü olarak belirlenen bağlantı sayısı: {len(noise_edges)}")
-                print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
-            if do_prune or do_short_tail or do_long_tail:
-                print("📦 Kullanıcı başına etkileşim temelli pruning başlatılıyor...")
-                unique_users, user_interaction_counts = np.unique(users_np, return_counts=True)
-                mean_interactions = np.mean(user_interaction_counts)
-                std_interactions = np.std(user_interaction_counts)
-               
-
-                if do_short_tail:
-                    users_to_prune = unique_users[user_interaction_counts < alpha]
-                    prune_mask = np.isin(users_np, users_to_prune, invert=True)
-                    users_np = users_np[prune_mask]
-                    items_np = items_np[prune_mask]
-
-                if do_long_tail:
-                    users_to_boost = unique_users[user_interaction_counts < alpha]
-                    boost_mask = np.isin(users_np, users_to_boost)
-                    users_np = np.concatenate([users_np, users_np[boost_mask]])
-                    items_np = np.concatenate([items_np, items_np[boost_mask]])
-
-                if do_prune and not (do_short_tail or do_long_tail):
-                    users_to_prune = unique_users[user_interaction_counts < alpha]
-                    prune_mask = np.isin(users_np, users_to_prune, invert=True)
-                    users_np = users_np[prune_mask]
-                    items_np = items_np[prune_mask]
-                    
-            print(f"✅ Prune sonrası toplam etkileşim sayısı: {len(users_np)}")
-
-            # 🔁 Güncellenmiş etkileşimleri Interaction formatına dönüştür
-            pruned_df = pd.DataFrame({ "user": users_np, "item": items_np })
-            self.dataset.train_data = Interaction(pruned_df, num_users=self.num_users, num_items=self.num_items)
-            self.dataset.num_train_ratings = len(pruned_df)    
-
-                            
-            print(f"Toplam etkileşim sayısı (pozitif): {len(self.dataset.train_data.to_user_item_pairs())}")
-
 
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         adj_matrix = self.create_adj_mat()
@@ -319,25 +192,6 @@ class SGL(AbstractRecommender):
 
         self.lightgcn = _LightGCN(self.num_users, self.num_items, self.emb_size,
                                   adj_matrix, self.n_layers).to(self.device)
-        if self.use_diffusion:
-            input_dim = 2 * self.emb_size  # sadece user + item embedding
-            self.dnn = DNN(
-                in_dims=[input_dim, 128],
-                out_dims=[128, input_dim],  # emb_stack boyutu = 2 * emb_size
-                emb_size=64  # timestep embedding ayrı alınacak
-            ).to(self.device)
-
-            self.diff_model = GaussianDiffusion(
-                mean_type=ModelMeanType[self.mean_type.upper()],
-                noise_schedule=self.noise_schedule,
-                noise_scale=self.noise_scale,
-                noise_min=self.noise_min,
-                noise_max=self.noise_max,
-                steps=self.diff_steps,
-                device=self.device
-            )
-            self.diff_optimizer = torch.optim.Adam(self.dnn.parameters(), lr=self.lr)
-
         if self.pretrain_flag:
             self.lightgcn.reset_parameters(pretrain=self.pretrain_flag, dir=self.save_dir)
         else:
@@ -352,7 +206,7 @@ class SGL(AbstractRecommender):
         prune = False
         n_clusters=10
         outlier_threshold=2
-        cluster_pruning = False
+        cluster_pruning = True
         if prune:
             print("Prune öncesi toplam etkileşim sayısı:", len(users_np))
 
@@ -484,15 +338,11 @@ class SGL(AbstractRecommender):
 
 
     def train_model(self):
-        data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)
-
-        #data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)       
-        print(f"Toplam etkileşim sayısı (pozitif): {len(self.dataset.train_data.to_user_item_pairs())}")
-             
+        data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)                    
         self.logger.info(self.evaluator.metrics_info())
         stopping_step = 0
         for epoch in range(1, self.epochs + 1):
-            total_loss, total_bpr_loss, total_reg_loss,loss2 = 0.0, 0.0, 0.0,0.0
+            total_loss, total_bpr_loss, total_reg_loss = 0.0, 0.0, 0.0
             training_start_time = time()
             if self.ssl_aug_type in ['nd', 'ed']:
                 sub_graph1 = self.create_adj_mat(is_subgraph=True, aug_type=self.ssl_aug_type)
@@ -511,20 +361,9 @@ class SGL(AbstractRecommender):
                 bat_users = torch.from_numpy(bat_users).long().to(self.device)
                 bat_pos_items = torch.from_numpy(bat_pos_items).long().to(self.device)
                 bat_neg_items = torch.from_numpy(bat_neg_items).long().to(self.device)
-                sup_logits, ssl_logits_user, ssl_logits_item, user_embs, item_embs = self.lightgcn(
+                sup_logits, ssl_logits_user, ssl_logits_item = self.lightgcn(
                     sub_graph1, sub_graph2, bat_users, bat_pos_items, bat_neg_items)
-
-                if self.use_diffusion:
-                   
-                    
-
-                    emb_stack = torch.cat([user_embs, item_embs], dim=1)
-                    diffusion_out = self.diff_model.training_losses(self.dnn, emb_stack)
-                    diffusion_loss = diffusion_out["loss"].mean()
-                    # 👇 DNN için ayrı optimizasyon yap (gerekirse retain_graph=True ekle)
-                    self.diff_optimizer.zero_grad()
-                    diffusion_loss.backward(retain_graph=True)
-                    self.diff_optimizer.step()
+                
                 # BPR Loss
                 bpr_loss = -torch.sum(F.logsigmoid(sup_logits))
 
@@ -540,7 +379,7 @@ class SGL(AbstractRecommender):
                 clogits_item = torch.logsumexp(ssl_logits_item / self.ssl_temp, dim=1)
                 infonce_loss = torch.sum(clogits_user + clogits_item)
                 
-                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss 
+                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss
                 total_loss += loss
                 total_bpr_loss += bpr_loss
                 total_reg_loss += self.reg * reg_loss
