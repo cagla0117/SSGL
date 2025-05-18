@@ -519,6 +519,7 @@ class SGL(AbstractRecommender):
 
                     # Reverse diffusion yoluyla rafine edilmiş gömülüler
                     with torch.no_grad():  # sampling sırasında gradient gerekmez
+                        torch.manual_seed(42)
                         diffused_emb_stack = self.diff_model.p_sample(
                             self.dnn, emb_stack, steps=self.diff_steps
                         )
@@ -534,6 +535,8 @@ class SGL(AbstractRecommender):
                     self.diff_optimizer.zero_grad()
                     diffusion_loss.backward(retain_graph=True)
                     self.diff_optimizer.step()
+                    print(f"[Epoch {epoch}] Diffusion Loss: {diffusion_loss.item():.6f}")
+
                 """
                 if self.use_diffusion:
 
@@ -620,3 +623,4 @@ class SGL(AbstractRecommender):
     def predict(self, users):
         users = torch.from_numpy(np.asarray(users)).long().to(self.device)
         return self.lightgcn.predict(users).cpu().detach().numpy()
+    
