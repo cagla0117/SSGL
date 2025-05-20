@@ -65,7 +65,6 @@ class DNN(nn.Module):
     
     def forward(self, x, timesteps):
         print("🟢 [DNN] input x device:", x.device)
-        print("🟢 [DNN] timestep t device:", t.device)
         time_emb = timestep_embedding(timesteps, self.time_emb_dim).to(x.device)
         emb = self.emb_layer(time_emb)
         if self.norm:
