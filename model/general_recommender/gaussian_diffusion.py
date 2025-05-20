@@ -122,8 +122,9 @@ class GaussianDiffusion(nn.Module):
             
             t = th.tensor([i] * x_t.shape[0]).to(x_start.device)
             out = self.p_mean_variance(model, x_t, t)
-            print(f"[diffusion] step {i} before:", x_t[0, :5].detach().cpu().numpy())
-            print(f"[diffusion] step {i} after: ", out["mean"][0, :5].detach().cpu().numpy())
+            if(i == 10):
+                print(f"[diffusion] step {i} before:", x_t[0, :5].detach().cpu().numpy())
+                print(f"[diffusion] step {i} after: ", out["mean"][0, :5].detach().cpu().numpy())
             if sampling_noise:
                 noise = th.randn_like(x_t)
                 nonzero_mask = (
