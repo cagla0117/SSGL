@@ -486,6 +486,11 @@ class SGL(AbstractRecommender):
 
 
     def train_model(self):
+        print("🔧 CUDA available:", torch.cuda.is_available())
+        print("🔧 CUDA device count:", torch.cuda.device_count())
+        print("🔧 Current device:", torch.cuda.current_device())
+        print("🔧 Device name:", torch.cuda.get_device_name(torch.cuda.current_device()) if torch.cuda.is_available() else "CPU")
+
         data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)
 
         #data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)       
@@ -524,9 +529,14 @@ class SGL(AbstractRecommender):
                         torch.manual_seed(42)
                         torch.manual_seed(42)
                         torch.cuda.manual_seed_all(42)
+                        print("🟢 [SGL] Using device:", self.device)
+                        print("🟢 [SGL] emb_stack device:", emb_stack.device)
+
                         diffused_emb_stack = self.diff_model.p_sample(
                             self.dnn, emb_stack, steps=self.diff_steps
                         )
+                        print("🟢 diffused_emb_stack device:", diffused_emb_stack.device)
+
 
                     # Geri ayır (rafine edilmiş halleri kullanıcı ve item için)
                     user_embs, item_embs = (
