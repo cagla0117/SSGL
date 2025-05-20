@@ -217,6 +217,7 @@ class GaussianDiffusion(nn.Module):
             raise ValueError
     
     def q_sample(self, x_start, t, noise=None):
+        t = t.to(x_start.device)
         if noise is None:
             noise = th.randn_like(x_start)
         assert noise.shape == x_start.shape
@@ -231,6 +232,7 @@ class GaussianDiffusion(nn.Module):
         Compute the mean and variance of the diffusion posterior:
             q(x_{t-1} | x_t, x_0)
         """
+        t = t.to(x_start.device)
         assert x_start.shape == x_t.shape
         posterior_mean = (
             self._extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
@@ -253,6 +255,7 @@ class GaussianDiffusion(nn.Module):
         Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
         the initial x, x_0.
         """
+        t = t.to(x.device)
         B, C = x.shape[:2]
         assert t.shape == (B, )
         model_output = model(x, t)
@@ -285,6 +288,7 @@ class GaussianDiffusion(nn.Module):
 
     
     def _predict_xstart_from_eps(self, x_t, t, eps):
+        t = t.to(x_t.device)
         assert x_t.shape == eps.shape
         return (
             self._extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t

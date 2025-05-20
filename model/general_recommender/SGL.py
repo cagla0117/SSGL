@@ -56,8 +56,8 @@ class _LightGCN(nn.Module):
             pretrain_item_embedding = np.load(dir + 'item_embeddings.npy')
             pretrain_user_tensor = torch.FloatTensor(pretrain_user_embedding).cuda()
             pretrain_item_tensor = torch.FloatTensor(pretrain_item_embedding).cuda()
-            self.user_embeddings = nn.Embedding.from_pretrained(pretrain_user_tensor)
-            self.item_embeddings = nn.Embedding.from_pretrained(pretrain_item_tensor)
+            self.user_embeddings = nn.Embedding.from_pretrained(pretrain_user_tensor).to(self.device)
+            self.item_embeddings = nn.Embedding.from_pretrained(pretrain_item_tensor).to(self.device)
         else:
             init = get_initializer(init_method)
             init(self.user_embeddings.weight)
@@ -520,6 +520,8 @@ class SGL(AbstractRecommender):
                     # Reverse diffusion yoluyla rafine edilmiş gömülüler
                     with torch.no_grad():  # sampling sırasında gradient gerekmez
                         torch.manual_seed(42)
+                        torch.manual_seed(42)
+                        torch.cuda.manual_seed_all(42)
                         diffused_emb_stack = self.diff_model.p_sample(
                             self.dnn, emb_stack, steps=self.diff_steps
                         )
