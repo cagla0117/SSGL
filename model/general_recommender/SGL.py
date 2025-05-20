@@ -41,6 +41,7 @@ class _LightGCN(nn.Module):
         self.embed_dim = embed_dim
         self.norm_adj = norm_adj
         self.n_layers = n_layers
+        
         self.user_embeddings = nn.Embedding(self.num_users, self.embed_dim)
         self.item_embeddings = nn.Embedding(self.num_items, self.embed_dim)
         self.dropout = nn.Dropout(0.1)
@@ -56,8 +57,9 @@ class _LightGCN(nn.Module):
             pretrain_item_embedding = np.load(dir + 'item_embeddings.npy')
             pretrain_user_tensor = torch.FloatTensor(pretrain_user_embedding).cuda()
             pretrain_item_tensor = torch.FloatTensor(pretrain_item_embedding).cuda()
-            self.user_embeddings = nn.Embedding.from_pretrained(pretrain_user_tensor).to(self.device)
-            self.item_embeddings = nn.Embedding.from_pretrained(pretrain_item_tensor).to(self.device)
+            self.user_embeddings = nn.Embedding.from_pretrained(pretrain_user_tensor).to(pretrain_user_tensor.device)
+            self.item_embeddings = nn.Embedding.from_pretrained(pretrain_item_tensor).to(pretrain_user_tensor.device)
+
         else:
             init = get_initializer(init_method)
             init(self.user_embeddings.weight)
