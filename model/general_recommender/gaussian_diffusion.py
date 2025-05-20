@@ -314,6 +314,7 @@ class GaussianDiffusion(nn.Module):
         """
         # res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
         arr = arr.to(timesteps.device)
+        assert arr.device == timesteps.device
         res = arr[timesteps].float()
         while len(res.shape) < len(broadcast_shape):
             res = res[..., None]
