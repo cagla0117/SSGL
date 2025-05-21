@@ -122,9 +122,7 @@ class GaussianDiffusion(nn.Module):
             
             t = th.tensor([i] * x_t.shape[0]).to(x_start.device)
             out = self.p_mean_variance(model, x_t, t)
-            if(i == 10):
-                print(f"[diffusion] step {i} before:", x_t[0, :5].detach().cpu().numpy())
-                print(f"[diffusion] step {i} after: ", out["mean"][0, :5].detach().cpu().numpy())
+              
             if sampling_noise:
                 noise = th.randn_like(x_t)
                 nonzero_mask = (
@@ -155,8 +153,7 @@ class GaussianDiffusion(nn.Module):
 
         assert model_output.shape == target.shape == x_start.shape
 
-        mse = mean_flat((target - model_output) ** 2)
-
+        mse = mean_flat((target.clone() - model_output.clone()) ** 2) 
         if reweight == True:
             if self.mean_type == ModelMeanType.START_X:
                 weight = self.SNR(ts - 1) - self.SNR(ts)

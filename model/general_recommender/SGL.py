@@ -30,6 +30,8 @@ from util.pytorch import sp_mat_to_sp_tensor
 from reckit import randint_choice
 from model.general_recommender.gaussian_diffusion import GaussianDiffusion, ModelMeanType
 from model.general_recommender.DNN import DNN
+from model.general_recommender.Discrete_DNN import DiscreteDNN
+
 
 
 
@@ -158,16 +160,18 @@ class SGL(AbstractRecommender):
         self.outlier_threshold = config["outlier_threshold"]
         # Diffusion parameters
         self.use_diffusion = config["use_diffusion"] if "use_diffusion" in config else False
-        self.diff_steps = config["diff_steps"] if "diff_steps" in config else 100
+        self.diff_steps = config["diff_steps"] if "diff_steps" in config else 1000
         self.noise_schedule = config["noise_schedule"] if "noise_schedule" in config else "linear"
         self.noise_scale = config["noise_scale"] if "noise_scale" in config else 1.0
         self.noise_min = config["noise_min"] if "noise_min" in config else 0.0001
-        self.noise_max = config["noise_max"] if "noise_max" in config else 0.02
+        self.noise_max = config["noise_max"] if "noise_max" in config else 0.5
         self.mean_type = config["mean_type"] if "mean_type" in config else "epsilon"
         self.best_result = np.array([0.0, 0.0, 0.0])  # Precision, Recall, NDCG
         self.best_epoch_prec = 0
         self.best_epoch_recall = 0
         self.best_epoch_ndcg = 0
+        self.diffusion_type = config["diffusion_type"] if "diffusion_type" in config else "gaussian"
+
 
 
 
@@ -322,23 +326,50 @@ class SGL(AbstractRecommender):
         self.lightgcn = _LightGCN(self.num_users, self.num_items, self.emb_size,
                                   adj_matrix, self.n_layers).to(self.device)
         if self.use_diffusion:
-            input_dim = 2 * self.emb_size  # sadece user + item embedding
-            self.dnn = DNN(
-                in_dims=[input_dim, 128],
-                out_dims=[128, input_dim],  # emb_stack boyutu = 2 * emb_size
-                emb_size=64  # timestep embedding ayrı alınacak
-            ).to(self.device)
+            input_dim = 2 * self.emb_size
+            if self.diffusion_type == "gaussian":
+                input_dim = 2 * self.emb_size
+                self.dnn = DNN(
+                    in_dims=[input_dim, 128],
+                    out_dims=[128, input_dim],
+                    emb_size=64
+                ).to(self.device)
+                print(self.diffusion_type)
 
-            self.diff_model = GaussianDiffusion(
-                mean_type=ModelMeanType[self.mean_type.upper()],
-                noise_schedule=self.noise_schedule,
-                noise_scale=self.noise_scale,
-                noise_min=self.noise_min,
-                noise_max=self.noise_max,
-                steps=self.diff_steps,
-                device=self.device
-            )
-            self.diff_optimizer = torch.optim.Adam(self.dnn.parameters(), lr=self.lr)
+                if self.diffusion_type == "gaussian":
+                    from model.general_recommender.gaussian_diffusion import GaussianDiffusion, ModelMeanType
+                    self.diff_model = GaussianDiffusion(
+                        mean_type=ModelMeanType[self.mean_type.upper()],
+                        noise_schedule=self.noise_schedule,
+                        noise_scale=self.noise_scale,
+                        noise_min=self.noise_min,
+                        noise_max=self.noise_max,
+                        steps=self.diff_steps,
+                        device=self.device
+                    )
+                elif self.diffusion_type == "discrete":
+                    from model.general_recommender.discrete_diffusion import DiscreteDiffusion
+                    self.diff_model = DiscreteDiffusion(
+                        steps=self.diff_steps,
+                        device=self.device
+                    )
+                else:
+                    raise ValueError(f"Unknown diffusion type: {self.diffusion_type}")
+
+                self.diff_optimizer = torch.optim.Adam(self.dnn.parameters(), lr=self.lr)
+                
+            else:
+                from model.general_recommender.discrete_diffusion import DiscreteDiffusion
+                self.dnn = DiscreteDNN(
+                    input_dim=input_dim,
+                    hidden_dim=128,
+                    use_time=True,  # eğer timestep kullanmak istiyorsan True
+                    time_dim=64
+                ).to(self.device)
+                self.diff_model = DiscreteDiffusion(
+                    steps=self.diff_steps,
+                    device=self.device)
+
 
         if self.pretrain_flag:
             self.lightgcn.reset_parameters(pretrain=self.pretrain_flag, dir=self.save_dir)
@@ -486,11 +517,8 @@ class SGL(AbstractRecommender):
 
 
     def train_model(self):
-        print("🔧 CUDA available:", torch.cuda.is_available())
-        print("🔧 CUDA device count:", torch.cuda.device_count())
-        print("🔧 Current device:", torch.cuda.current_device())
-        print("🔧 Device name:", torch.cuda.get_device_name(torch.cuda.current_device()) if torch.cuda.is_available() else "CPU")
-
+     
+        torch.autograd.set_detect_anomaly(True)
         data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)
 
         #data_iter = PairwiseSamplerV2(self.dataset.train_data, num_neg=1, batch_size=self.batch_size, shuffle=True)       
@@ -520,35 +548,21 @@ class SGL(AbstractRecommender):
                 bat_neg_items = torch.from_numpy(bat_neg_items).long().to(self.device)
                 sup_logits, ssl_logits_user, ssl_logits_item, user_embs, item_embs = self.lightgcn(
                     sub_graph1, sub_graph2, bat_users, bat_pos_items, bat_neg_items)
+                diffusion_loss = 0
                 if self.use_diffusion:
                     # user_embs ve item_embs [batch_size, emb_dim] boyutunda
-                    emb_stack = torch.cat([user_embs, item_embs], dim=1)  # [batch_size, 2*emb_dim]
+                    # Diffusion model'den önce tensörleri kopyalayın
+                    emb_stack = torch.cat([user_embs.clone(), item_embs.clone()], dim=1)
 
-                    # Reverse diffusion yoluyla rafine edilmiş gömülüler
-                    with torch.no_grad():  # sampling sırasında gradient gerekmez
-                        torch.manual_seed(42)
-                        torch.manual_seed(42)
-                        torch.cuda.manual_seed_all(42)
-                        print("🟢 [SGL] Using device:", self.device)
-                        print("🟢 [SGL] emb_stack device:", emb_stack.device)
-
-                        diffused_emb_stack = self.diff_model.p_sample(
-                            self.dnn, emb_stack, steps=self.diff_steps
-                        )
-                        print("🟢 diffused_emb_stack device:", diffused_emb_stack.device)
-
-
-                    # Geri ayır (rafine edilmiş halleri kullanıcı ve item için)
-                    user_embs, item_embs = (
-                        diffused_emb_stack[:, :self.emb_size],
-                        diffused_emb_stack[:, self.emb_size:]
-                    )
-                        # 💡 Ek olarak: diffusion ağı da optimize edilsin (DNN eğitilsin)
+                    # Diffusion model'i eğitin
                     diffusion_out = self.diff_model.training_losses(self.dnn, emb_stack)
                     diffusion_loss = diffusion_out["loss"].mean()
-                    self.diff_optimizer.zero_grad()
-                    diffusion_loss.backward(retain_graph=True)
-                    self.diff_optimizer.step()
+
+                    #self.diff_optimizer.zero_grad()
+                    #diffusion_loss.backward(retain_graph=True)  # retain_graph=True ekleyin
+                    #self.diff_optimizer.step()
+
+                    
                     
                 """
                 if self.use_diffusion:
@@ -574,8 +588,9 @@ class SGL(AbstractRecommender):
                 clogits_user = torch.logsumexp(ssl_logits_user / self.ssl_temp, dim=1)
                 clogits_item = torch.logsumexp(ssl_logits_item / self.ssl_temp, dim=1)
                 infonce_loss = torch.sum(clogits_user + clogits_item)
-                diffusion_weight = 0.1
-                loss = bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss
+                diffusion_weight = 0.8
+                loss =  bpr_loss + self.ssl_reg * infonce_loss + self.reg * reg_loss + diffusion_weight * diffusion_loss
+
                 total_loss += loss
                 total_bpr_loss += bpr_loss
                 total_reg_loss += self.reg * reg_loss
@@ -622,6 +637,7 @@ class SGL(AbstractRecommender):
         else:
             buf = '\t'.join([("%.4f" % x).ljust(12) for x in self.best_result])
         self.logger.info("\t\t%s" % buf)
+        
 
     # @timer
     def evaluate_model(self):
