@@ -5,7 +5,9 @@ Reference: https://github.com/wujcan/SGL-Torch
 """
 from sklearn.cluster import MiniBatchKMeans
 
-
+import os
+import pandas as pd
+from openpyxl import load_workbook
 import torch
 from sklearn.cluster import KMeans
 import numpy as np
@@ -635,9 +637,57 @@ class SGL(AbstractRecommender):
         elif self.pretrain_flag:
             buf, _ = self.evaluate_model()
         else:
-            buf = '\t'.join([("%.4f" % x).ljust(12) for x in self.best_result])
+            buf = '\t'.join([("%.8f" % x).ljust(12) for x in self.best_result])
         self.logger.info("\t\t%s" % buf)
         
+        xlsx_path = os.path.join(self.config.root_dir, "sgl_results.xlsx")
+        
+        # 👇 Kaydedilecek veri
+        data_dict = {
+            "dataset": self.dataset_name,
+            "model": self.model_name,
+            "epoch": self.best_epoch,
+            "precision":  "%.8f" % self.best_result[0],
+            "recall": "%.8f" % self.best_result[1],
+            "ndcg": "%.8f" % self.best_result[2],
+            "alpha": self.alpha,
+            "cluster_prune": self.do_cluster_prune,
+            "short_tail": self.do_short_tail,
+            "long_tail": self.do_long_tail,
+            "diffusion": self.use_diffusion,
+            "diff_type": self.diffusion_type,
+            "outlier_threshold": self.outlier_threshold,
+
+            
+            "reg": self.reg,
+            "embed_size": self.emb_size,
+            "batch_size": self.batch_size,
+            "ssl_reg": self.ssl_reg,
+            "ssl_ratio": self.ssl_ratio,
+            "ssl_mode": self.ssl_mode,
+            "ssl_temp": self.ssl_temp,
+            "n_layers": self.n_layers,
+            
+            "diff_steps": self.diff_steps,
+            "noise_schedule": self.noise_schedule,
+            "noise_scale": self.noise_scale
+            
+        }
+
+        new_df = pd.DataFrame([data_dict])
+
+                
+        if os.path.exists(xlsx_path):
+            book = load_workbook(xlsx_path)
+            writer = pd.ExcelWriter(xlsx_path, engine='openpyxl', mode='a', if_sheet_exists='overlay')
+            writer.book = book
+            writer.sheets = {ws.title: ws for ws in book.worksheets}
+            
+            startrow = writer.sheets['Sheet1'].max_row  # 'Sheet1' varsayılan ad
+            new_df.to_excel(writer, startrow=startrow, index=False, header=False)
+            writer.close()
+        else:
+            new_df.to_excel(xlsx_path, index=False)
 
     # @timer
     def evaluate_model(self):
