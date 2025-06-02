@@ -676,18 +676,7 @@ class SGL(AbstractRecommender):
 
         new_df = pd.DataFrame([data_dict])
 
-                
-        if os.path.exists(xlsx_path):
-            book = load_workbook(xlsx_path)
-            writer = pd.ExcelWriter(xlsx_path, engine='openpyxl', mode='a', if_sheet_exists='overlay')
-            writer.book = book
-            writer.sheets = {ws.title: ws for ws in book.worksheets}
-            
-            startrow = writer.sheets['Sheet1'].max_row  # 'Sheet1' varsayılan ad
-            new_df.to_excel(writer, startrow=startrow, index=False, header=False)
-            writer.close()
-        else:
-            new_df.to_excel(xlsx_path, index=False)
+
 
     # @timer
     def evaluate_model(self):
